@@ -2,6 +2,7 @@ import logging
 import asyncio
 from typing import Dict, Any, AsyncGenerator
 from .models import TaskRequest
+from .api_clients import OxxylabsClient, AttomClient
 
 logger = logging.getLogger(__name__)
 
@@ -11,6 +12,7 @@ class TaskManager:
     def __init__(self):
         self.tasks: Dict[str, Dict[str, Any]] = {}
         self.task_results: Dict[str, Dict[str, Any]] = {}
+        self.attom_client = AttomClient()
     
     async def execute_task(self, request: TaskRequest) -> Dict[str, Any]:
         """Execute a task and return its result."""
@@ -21,15 +23,24 @@ class TaskManager:
                 "status": "running"
             }
 
-            # Simulate task execution
-            await asyncio.sleep(1)
-            
-            # Generate a mock result
+            # Get parameters
+            params = request.params
+            location = params.get("location")
+            price_range = params.get("price_range")
+            bedrooms = params.get("bedrooms")
+            bathrooms = params.get("bathrooms")
+            property_type = params.get("property_type")
+
+            # Search properties using Attom API only
+            attom_results = await self.attom_client.search_properties(
+                location, price_range, bedrooms, bathrooms, property_type
+            )
+
+            # Format results
             result = {
                 "status": "completed",
                 "data": {
-                    "message": f"Task {request.id} completed successfully",
-                    "params": request.params
+                    "attom_results": attom_results
                 }
             }
 
@@ -54,22 +65,43 @@ class TaskManager:
                 "status": "running"
             }
 
-            # Simulate streaming progress
-            for i in range(5):
-                await asyncio.sleep(0.5)
-                progress = {
-                    "status": "in_progress",
-                    "progress": (i + 1) * 20,
-                    "message": f"Processing step {i + 1} of 5"
-                }
-                yield progress
+            # Get parameters
+            params = request.params
+            location = params.get("location")
+            price_range = params.get("price_range")
+            bedrooms = params.get("bedrooms")
+            bathrooms = params.get("bathrooms")
+            property_type = params.get("property_type")
+
+            # Stream progress updates
+            yield {
+                "status": "in_progress",
+                "progress": 20,
+                "message": "Starting property search..."
+            }
+
+            # Search Attom
+            yield {
+                "status": "in_progress",
+                "progress": 60,
+                "message": "Searching Attom database..."
+            }
+            attom_results = await self.attom_client.search_properties(
+                location, price_range, bedrooms, bathrooms, property_type
+            )
+
+            # Process results
+            yield {
+                "status": "in_progress",
+                "progress": 80,
+                "message": "Processing results..."
+            }
 
             # Final result
             result = {
                 "status": "completed",
                 "data": {
-                    "message": f"Task {request.id} completed successfully",
-                    "params": request.params
+                    "attom_results": attom_results
                 }
             }
 
