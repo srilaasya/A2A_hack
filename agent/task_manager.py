@@ -1,8 +1,9 @@
 import logging
 import asyncio
 from typing import Dict, Any, AsyncGenerator
-from .models import TaskRequest
-from .api_clients import OxxylabsClient, AttomClient
+from .models import TaskRequest, TaskResponse, TaskStatus
+from .api_clients import AttomClient
+from .integrations import NotionClient, ZillowClient, GmailClient
 
 logger = logging.getLogger(__name__)
 
@@ -10,112 +11,126 @@ class TaskManager:
     """Manages property search tasks."""
     
     def __init__(self):
-        self.tasks: Dict[str, Dict[str, Any]] = {}
-        self.task_results: Dict[str, Dict[str, Any]] = {}
         self.attom_client = AttomClient()
+        self.notion_client = NotionClient()
+        self.zillow_client = ZillowClient()
+        self.gmail_client = GmailClient()
     
-    async def execute_task(self, request: TaskRequest) -> Dict[str, Any]:
+    async def execute_task(self, task_request: TaskRequest) -> TaskResponse:
         """Execute a task and return its result."""
         try:
-            # Store the task
-            self.tasks[request.id] = {
-                "params": request.params,
-                "status": "running"
-            }
+            # Get parameters from task request
+            location = task_request.parameters.get("location", "")
+            price_range = task_request.parameters.get("price_range", "$500k-$1M")
+            bedrooms = task_request.parameters.get("bedrooms", 2)
+            bathrooms = task_request.parameters.get("bathrooms", 2)
+            property_type = task_request.parameters.get("property_type", "condo")
+            email = task_request.parameters.get("email", "")
 
-            # Get parameters
-            params = request.params
-            location = params.get("location")
-            price_range = params.get("price_range")
-            bedrooms = params.get("bedrooms")
-            bathrooms = params.get("bathrooms")
-            property_type = params.get("property_type")
-
-            # Search properties using Attom API only
-            attom_results = await self.attom_client.search_properties(
-                location, price_range, bedrooms, bathrooms, property_type
+            # Search properties from multiple sources
+            attom_properties = await self.attom_client.search_properties(
+                location=location,
+                price_range=price_range,
+                bedrooms=bedrooms,
+                bathrooms=bathrooms
             )
 
-            # Format results
-            result = {
-                "status": "completed",
-                "data": {
-                    "attom_results": attom_results
-                }
-            }
+            zillow_properties = await self.zillow_client.search_properties(
+                location=location,
+                price_range=price_range,
+                bedrooms=bedrooms,
+                bathrooms=bathrooms
+            )
 
-            # Store the result
-            self.task_results[request.id] = result
-            self.tasks[request.id]["status"] = "completed"
+            # Combine and deduplicate properties
+            all_properties = self._combine_properties(attom_properties, zillow_properties)
 
-            return result
+            # Add properties to Notion database
+            for property_data in all_properties:
+                await self.notion_client.add_property(property_data)
+
+            # Send email update if email provided
+            if email and all_properties:
+                await self.gmail_client.send_property_update(email, all_properties)
+
+            return TaskResponse(
+                task_id=task_request.task_id,
+                status=TaskStatus.SUCCESS_WITH_RESULT,
+                result=all_properties
+            )
 
         except Exception as e:
-            logger.error(f"Error executing task {request.id}: {e}")
-            self.tasks[request.id]["status"] = "failed"
-            self.tasks[request.id]["error"] = str(e)
-            raise
+            logger.error(f"Error executing task: {e}")
+            return TaskResponse(
+                task_id=task_request.task_id,
+                status=TaskStatus.FAILED,
+                error_message=str(e)
+            )
 
-    async def execute_task_stream(self, request: TaskRequest) -> AsyncGenerator[Dict[str, Any], None]:
+    async def execute_task_stream(self, task_request: TaskRequest) -> AsyncGenerator[Dict[str, Any], None]:
         """Execute a task and stream its progress."""
         try:
-            # Store the task
-            self.tasks[request.id] = {
-                "params": request.params,
-                "status": "running"
-            }
-
-            # Get parameters
-            params = request.params
-            location = params.get("location")
-            price_range = params.get("price_range")
-            bedrooms = params.get("bedrooms")
-            bathrooms = params.get("bathrooms")
-            property_type = params.get("property_type")
+            # Get parameters from task request
+            location = task_request.parameters.get("location", "")
+            price_range = task_request.parameters.get("price_range", "$500k-$1M")
+            bedrooms = task_request.parameters.get("bedrooms", 2)
+            bathrooms = task_request.parameters.get("bathrooms", 2)
+            property_type = task_request.parameters.get("property_type", "condo")
+            email = task_request.parameters.get("email", "")
 
             # Stream progress updates
-            yield {
-                "status": "in_progress",
-                "progress": 20,
-                "message": "Starting property search..."
-            }
-
-            # Search Attom
-            yield {
-                "status": "in_progress",
-                "progress": 60,
-                "message": "Searching Attom database..."
-            }
-            attom_results = await self.attom_client.search_properties(
-                location, price_range, bedrooms, bathrooms, property_type
+            yield {"status": "searching", "message": "Searching Attom API..."}
+            attom_properties = await self.attom_client.search_properties(
+                location=location,
+                price_range=price_range,
+                bedrooms=bedrooms,
+                bathrooms=bathrooms
             )
 
-            # Process results
+            yield {"status": "searching", "message": "Searching Zillow..."}
+            zillow_properties = await self.zillow_client.search_properties(
+                location=location,
+                price_range=price_range,
+                bedrooms=bedrooms,
+                bathrooms=bathrooms
+            )
+
+            # Combine and deduplicate properties
+            all_properties = self._combine_properties(attom_properties, zillow_properties)
+
+            yield {"status": "processing", "message": "Updating Notion database..."}
+            for property_data in all_properties:
+                await self.notion_client.add_property(property_data)
+
+            if email and all_properties:
+                yield {"status": "processing", "message": "Sending email update..."}
+                await self.gmail_client.send_property_update(email, all_properties)
+
             yield {
-                "status": "in_progress",
-                "progress": 80,
-                "message": "Processing results..."
-            }
-
-            # Final result
-            result = {
                 "status": "completed",
-                "data": {
-                    "attom_results": attom_results
-                }
+                "message": "Task completed successfully",
+                "result": all_properties
             }
-
-            # Store the result
-            self.task_results[request.id] = result
-            self.tasks[request.id]["status"] = "completed"
-
-            yield result
 
         except Exception as e:
-            logger.error(f"Error executing task stream {request.id}: {e}")
-            self.tasks[request.id]["status"] = "failed"
-            self.tasks[request.id]["error"] = str(e)
-            raise
+            logger.error(f"Error in task stream: {e}")
+            yield {
+                "status": "error",
+                "message": str(e)
+            }
+
+    def _combine_properties(self, attom_properties: list, zillow_properties: list) -> list:
+        """Combine and deduplicate properties from different sources"""
+        combined = []
+        seen_addresses = set()
+
+        for prop in attom_properties + zillow_properties:
+            address = prop.get("address", "").lower()
+            if address and address not in seen_addresses:
+                seen_addresses.add(address)
+                combined.append(prop)
+
+        return combined
 
     def get_task(self, task_id: str) -> Dict[str, Any]:
         """Get the status and result of a task."""
